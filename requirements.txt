@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg2-binary
+feedparser
+pydantic
+crewai
+openai
+pydantic-settings
+psycopg2-binary
+certifi
+crawl4ai
+langchain
+langchain-community
+langchain-core
