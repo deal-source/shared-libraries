@@ -1,139 +1,139 @@
-from app.db.session import SessionLocal
-from app.db.models import Article, Deal
-from app.utils.logger import logger
-from crewai import Crew, Task
-from app.business.agents import create_merger_agent, create_deal_extractor_agent, create_crawler_agent
 import json
-import requests
-from crawl4ai import AsyncWebCrawler
+import csv
 import asyncio
+from bs4 import BeautifulSoup  # <== We will use this to extract page title
+from crewai import Crew, Task
+from app.utils.logger import logger
+from app.business.agents import create_deal_extractor_agent
+from crawl4ai import AsyncWebCrawler
+
+INPUT_CSV = "input_urls.csv"  # Your input CSV with only 'url' header
+OUTPUT_CSV = "clairfield_deal_data.csv"
+OUTPUT_JSON = "clairfield_deal_data.json"
 
 
 async def crawl_url(url):
-    """Use crawl4ai to fetch and convert article to markdown"""
+    """Use crawl4ai to fetch and convert article to markdown, also fetch raw html"""
     try:
-        # Create an instance of AsyncWebCrawler using async context manager
         async with AsyncWebCrawler() as crawler:
-            # Run the crawler on the URL using the correct arun method
             result = await crawler.arun(url=url)
-            # Return the markdown content
-            return result.markdown if hasattr(result, 'markdown') else str(result)
+            return {
+                "markdown": result.markdown if hasattr(result, 'markdown') else str(result),
+                "html": result.html if hasattr(result, 'html') else ""
+            }
     except Exception as e:
         logger.error(f"Error crawling {url}: {e}")
-        return ''
+        return {"markdown": "", "html": ""}
+
+
+def extract_title_from_html(html_content):
+    """Simple function to extract <title> from raw HTML"""
+    if not html_content:
+        return ""
+    try:
+        soup = BeautifulSoup(html_content, "html.parser")
+        return soup.title.string.strip() if soup.title and soup.title.string else ""
+    except Exception as e:
+        logger.warning(f"Failed to extract title from HTML: {e}")
+        return ""
 
 
 def run_pipeline():
-    db = SessionLocal()
-    merger_agent = create_merger_agent()
     extractor_agent = create_deal_extractor_agent()
-    crawler_agent = create_crawler_agent()
 
-    articles = db.query(Article).filter_by(processed=False).all()
-    articles=articles[:1]
+    # ✅ Read URLs from CSV
+    urls = []
+    with open(INPUT_CSV, newline='', encoding='utf-8') as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            url = row.get("url", "").strip()
+            if url:
+                urls.append(url)
 
-    for article in articles:
-        url = article.link
+    logger.info(f"🔍 Found {len(urls)} URLs to process")
 
-        # First, crawl the URL to get markdown content
+    output_data = []
+
+    # ✅ Prepare CSV writer
+    csv_file = open(OUTPUT_CSV, "w", newline='', encoding='utf-8')
+    fieldnames = [
+        "article_title", "article_link", "buyer", "seller", "company",
+        "investor", "divestor", "date", "amount", "countries_involved", "additional_notes"
+    ]
+    writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+    writer.writeheader()
+
+    for idx, url in enumerate(urls, start=1):
+        print(f"\n🔄 Processing article {idx}/{len(urls)}: {url}")
+
         try:
-            # Run the async crawling function
-            markdown_content = asyncio.run(crawl_url(url))
+            crawl_result = asyncio.run(crawl_url(url))
+            markdown_content = crawl_result.get("markdown", "")
+            html_content = crawl_result.get("html", "")
         except Exception as e:
-            logger.error(f"Error during crawling {url}: {e}")
+            logger.error(f"❌ Crawling failed: {e}")
             markdown_content = ""
+            html_content = ""
 
-        # Create a task for the crawler agent to process the markdown
-        crawl_task = Task(
-            description=f"Process this article content and clean it up into proper markdown format:\n\n{markdown_content}",
-            expected_output="Clean, well-formatted markdown content of the article",
-            agent=crawler_agent
+        if not markdown_content:
+            logger.warning(f"⚠️ No content found for {url}")
+            continue
+
+        # 🏷️ Extract title from HTML
+        title = extract_title_from_html(html_content)
+        if not title:
+            title = "Unknown Title"
+
+        full_text = f"{title}\n\n{markdown_content}"
+
+        extract_task = Task(
+            description=(
+                "Extract detailed deal information from the article below. "
+                "Return a JSON object with the following keys:\n"
+                "`buyer`, `seller`, `company`, `investor`, `divestor`, `date`, `amount`, `countries_involved`, `additional_notes`\n\n"
+                f"Article:\n{full_text}"
+            ),
+            expected_output=(
+                "JSON with keys: buyer, seller, company, investor, divestor, date, amount, countries_involved, additional_notes"
+            ),
+            agent=extractor_agent,
         )
 
-        # Only run the crawler agent if we have content
-        if markdown_content:
-            # Create a crew for the crawler task
-            crawler_crew = Crew(
-                agents=[crawler_agent],
-                tasks=[crawl_task]
-            )
-            # Use the correct method to execute the crew
-            crawl_result = crawler_crew.kickoff()
-        else:
-            # Fallback to the original approach if crawling failed
-            try:
-                raw_content = requests.get(url).text
-                crawl_result = raw_content
-            except Exception as e:
-                logger.error(f"Error fetching content with requests: {e}")
-                crawl_result = article.content or ""
+        extract_crew = Crew(agents=[extractor_agent], tasks=[extract_task])
+        result = extract_crew.kickoff()
 
-        # Combine all available content
-        full_text = f"{article.title}\n\n{article.summary}\n\n{crawl_result}"
-
-        # Save the markdown content to the article
-        # article.content = crawl_result
-        # db.commit()
-
-        classify_task = Task(
-            description=f"Is this article about a deal or merger?\n\n{full_text}",
-            expected_output="Return 'Yes' if it's about a deal/merger, otherwise 'No'.",
-            agent=merger_agent
-        )
-
-        # Create a crew for the classification task
-        classifier_crew = Crew(
-            agents=[merger_agent],
-            tasks=[classify_task]
-        )
-        # Use the correct method to execute the crew
-        result = classifier_crew.kickoff()
-
-        article.processed = True
         try:
-            task_output = result.tasks_output[0].raw
-            article.is_deal_related = "yes" in task_output.lower()
-        except (IndexError, AttributeError) as e:
-            logger.warning(f"Failed to parse classification output: {e}")
-            article.is_deal_related = False
-        db.commit()
+            data = json.loads(result.tasks_output[0].raw)
+            # Add base info
+            data["article_link"] = url
+            data["article_title"] = title
+            output_data.append(data)
 
-        if article.is_deal_related:
-            extract_task = Task(
-                description=(
-                    "Extract the following info: Buyer, Seller, Deal Amount, Date, and notes.\n\n"
-                    f"Article:\n{full_text}"
-                ),
-                expected_output=(
-                    "JSON with keys: buyer, seller, amount, date, additional_notes"
-                ),
-                agent=extractor_agent
-            )
+            # Write to CSV
+            writer.writerow({
+                "article_title": title,
+                "article_link": url,
+                "buyer": data.get("buyer", ""),
+                "seller": data.get("seller", ""),
+                "company": data.get("company", ""),
+                "investor": data.get("investor", ""),
+                "divestor": data.get("divestor", ""),
+                "date": data.get("date", ""),
+                "amount": data.get("amount", ""),
+                "countries_involved": data.get("countries_involved", ""),
+                "additional_notes": data.get("additional_notes", "")
+            })
 
-            # Create a crew for the extraction task
-            extractor_crew = Crew(
-                agents=[extractor_agent],
-                tasks=[extract_task]
-            )
-            # Use the correct method to execute the crew
-            extract_result = extractor_crew.kickoff()
+            logger.info(f"✅ Deal extracted for: {title}")
+        except Exception as e:
+            logger.warning(f"❌ Failed to parse extraction result: {result} - {e}")
 
-            try:
-                data = json.loads(extract_result)
-                deal = Deal(
-                    article_id=article.id,
-                    buyer=data.get("buyer"),
-                    seller=data.get("seller"),
-                    amount=data.get("amount"),
-                    date=data.get("date"),
-                    additional_notes=data.get("additional_notes")
-                )
-                db.add(deal)
-                db.commit()
-            except Exception as e:
-                logger.warning(f"Failed to parse extraction result: {extract_result} - {e}")
+    # Save to JSON
+    with open(OUTPUT_JSON, "w", encoding="utf-8") as f:
+        json.dump(output_data, f, ensure_ascii=False, indent=2)
 
-    db.close()
+    csv_file.close()
+    logger.info(f"📁 Saved output to {OUTPUT_JSON} and {OUTPUT_CSV}")
 
 
 if __name__ == '__main__':
