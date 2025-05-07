@@ -29,6 +29,76 @@ RANDOM_DELAY_MIN = 5  # Minimum random delay between requests
 RANDOM_DELAY_MAX = 15  # Maximum random delay between requests
 
 
+def preprocess_content_for_llm(content, max_chars=15000):
+    """
+    Preprocess the raw content to reduce token count while preserving important information
+
+    Args:
+        content: The raw content from the webpage
+        max_chars: Maximum characters to include
+
+    Returns:
+        Preprocessed content optimized for the LLM
+    """
+    # Check if content is too short to process
+    if not content or len(content) < 1000:
+        return content
+
+    # Extract key sections
+    lines = content.strip().split('\n')
+
+    # Always keep the title
+    title = lines[0] if lines and lines[0].startswith('# ') else ""
+
+    # Clean the content
+    filtered_lines = []
+
+    # Track if we're in a likely relevant section
+    in_relevant_section = False
+
+    # Keywords that might indicate important sections
+    deal_keywords = [
+        "acquisition", "merger", "invest", "funding", "transaction", "deal",
+        "stake", "buyout", "purchase", "acquire", "million", "billion",
+        "announced", "agreement", "acquire", "bought", "sold", "divestiture",
+        "series", "round", "capital", "financing", "venture", "private equity"
+    ]
+
+    # Keywords that indicate sections to skip
+    skip_keywords = [
+        "cookie", "privacy policy", "terms of use", "copyright", "all rights reserved",
+        "newsletter", "subscribe", "follow us", "social media", "comment", "advertisement"
+    ]
+
+    for line in lines[1:]:  # Skip title line
+        # Skip very short lines or lines with skip keywords
+        if len(line.strip()) < 5 or any(keyword in line.lower() for keyword in skip_keywords):
+            continue
+
+        # Check if this line starts a new relevant section
+        if any(keyword in line.lower() for keyword in deal_keywords):
+            in_relevant_section = True
+            filtered_lines.append(line)
+        # If in a relevant section, keep adding lines
+        elif in_relevant_section:
+            filtered_lines.append(line)
+            # Reset if we hit a large gap
+            if not line.strip():
+                in_relevant_section = False
+        # Otherwise be selective about what we keep
+        elif len(line) > 50:  # Only keep substantial lines when not in a relevant section
+            filtered_lines.append(line)
+
+    # Reconstruct the filtered content
+    filtered_content = "\n".join([title] + filtered_lines)
+
+    # Truncate if still too long
+    if len(filtered_content) > max_chars:
+        filtered_content = filtered_content[:max_chars] + "\n\n[Content truncated due to length]"
+
+    return filtered_content
+
+
 async def fetch_content_with_playwright(url, retry_count=0):
     """Fetch content using Playwright with rate limiting and retries"""
     # Add random delay to avoid rate limiting
@@ -60,8 +130,8 @@ async def fetch_content_with_playwright(url, retry_count=0):
             # Create a new page and navigate to the URL
             page = await context.new_page()
 
-            # Set timeout to handle slow-loading pages
-            page.set_default_timeout(60000)
+            # Set timeout to handle slow-loading pages - INCREASED FROM 30 SECONDS TO 60 SECONDS
+            page.set_default_timeout(60000)  # 60 seconds timeout
 
             # Add header to appear more like a real browser
             await page.set_extra_http_headers({
@@ -72,10 +142,18 @@ async def fetch_content_with_playwright(url, retry_count=0):
                 'Upgrade-Insecure-Requests': '1'
             })
 
-            response = await page.goto(url, wait_until='networkidle')
+            # Try a different waiting strategy and use longer timeout
+            try:
+                response = await page.goto(url, wait_until='networkidle', timeout=60000)
+            except Exception as nav_error:
+                logger.warning(f"Network idle timeout, trying domcontentloaded: {nav_error}")
+                # If networkidle times out, try with domcontentloaded which is faster
+                await page.goto(url, wait_until='domcontentloaded', timeout=60000)
 
-            # Check if we got blocked
-            if response.status == 429 or response.status == 403:
+            # Check if we got blocked or if status code indicates an issue
+            page_status = await page.evaluate("() => { return window.status || '200' }")
+            if page_status == '429' or page_status == '403' or response and (
+                    response.status == 429 or response.status == 403):
                 if retry_count < MAX_RETRIES:
                     logger.warning(
                         f"⚠️ Rate limited on {url}, retrying in a moment (attempt {retry_count + 1}/{MAX_RETRIES})")
@@ -89,8 +167,8 @@ async def fetch_content_with_playwright(url, retry_count=0):
                     await browser.close()
                     return ""
 
-            # Wait for a bit to ensure JavaScript execution
-            await asyncio.sleep(2)
+            # Wait longer to ensure JavaScript execution
+            await asyncio.sleep(5)
 
             # Extract the page content
             html_content = await page.content()
@@ -109,6 +187,16 @@ async def fetch_content_with_playwright(url, retry_count=0):
 
             # Close the browser
             await browser.close()
+
+            # Check if we actually got content
+            if not html_content or len(html_content) < 500:
+                logger.warning(f"⚠️ Very little content returned from {url}, may be blocked")
+                if retry_count < MAX_RETRIES:
+                    retry_delay = RETRY_DELAY_BASE * (2 ** retry_count) + random.uniform(10, 30)
+                    await asyncio.sleep(retry_delay)
+                    return await fetch_content_with_playwright(url, retry_count + 1)
+                else:
+                    return ""
 
             # Convert HTML to a more readable format using BeautifulSoup
             soup = BeautifulSoup(html_content, 'html.parser')
@@ -168,6 +256,10 @@ def check_deal_relevance(title, content):
     if "Error 429" in title or "too many requests" in content:
         return False
 
+    # Optimize content for deal detection
+    # For relevance check, we need less text - first 3000 chars should be enough
+    optimized_content = preprocess_content_for_llm(content, max_chars=3000)
+
     merger_agent = create_merger_agent()
     task = Task(
         description=(
@@ -180,7 +272,7 @@ def check_deal_relevance(title, content):
             "- Minority stake purchases\n"
             "- Asset sales or divestitures\n\n"
             "Return ONLY 'YES' if it's deal-related, or 'NO' if it's not.\n\n"
-            f"Title: {title}\nContent: {content[:1500]}"
+            f"Title: {title}\nContent: {optimized_content}"
         ),
         expected_output="YES or NO",
         agent=merger_agent
@@ -537,7 +629,10 @@ async def process_single_url(url, result_writer, extractor_agent, website_agent,
         return None
 
     logger.info(f"✅ Deal-related article found: {url}")
-    full_text = f"{title}\n\n{markdown_content}"
+
+    # Preprocess content to reduce token count
+    optimized_content = preprocess_content_for_llm(markdown_content)
+    full_text = f"{title}\n\n{optimized_content}"
 
     # Extract deal data
     extract_task = Task(
@@ -665,6 +760,7 @@ async def process_single_url(url, result_writer, extractor_agent, website_agent,
             logger.info(f"✅ Added/updated investor in database: {investor_name}")
 
         # Add divestor to database
+# Add divestor to database
         if enriched_data.get("divestor"):
             divestor_name = enriched_data.get("divestor")
             divestor_website = enriched_data.get("divestor_website", "")
