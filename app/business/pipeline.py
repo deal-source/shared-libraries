@@ -93,8 +93,8 @@ def preprocess_content_for_llm(content, max_chars=15000):
     filtered_content = "\n".join([title] + filtered_lines)
 
     # Truncate if still too long
-    if len(filtered_content) > max_chars:
-        filtered_content = filtered_content[:max_chars] + "\n\n[Content truncated due to length]"
+    # if len(filtered_content) > max_chars:
+    #     filtered_content = filtered_content[:max_chars] + "\n\n[Content truncated due to length]"
 
     return filtered_content
 
