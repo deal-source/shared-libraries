@@ -44,3 +44,8 @@ certifi>=2023.7.22
 # For testing (optional - can be in a separate dev-requirements.txt)
 pytest>=7.3.1
 pytest-asyncio>=0.21.0
+
+playwright
+bs4
+crewai
+requests
