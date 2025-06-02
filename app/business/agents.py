@@ -10,6 +10,11 @@ from typing import Optional, Any
 import psycopg2
 from psycopg2 import sql
 from psycopg2.extras import execute_values
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Set up logging for the API calls
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -176,16 +181,14 @@ class DatabaseWriterTool(BaseTool):
             return "No company name provided"
 
         try:
-            # Connection parameters - these should be configured in environment variables
-            # or a config file in a production environment
+            # Get connection parameters from environment variables
             conn_params = {
-                "dbname": "dealsource_raw",
-                "user": "postgres",
-                "password": "SatyaSem#admin1",  # Should be from environment variable
-                "host": "34.91.220.83",
-                "port": "5432"
+                "dbname": os.getenv("DB_NAME", "dealsource_raw"),
+                "user": os.getenv("DB_USER", "postgres"),
+                "password": os.getenv("DB_PASSWORD", ""),
+                "host": os.getenv("DB_HOST", "localhost"),
+                "port": os.getenv("DB_PORT", "5432")
             }
-
 
             # Connect to the database
             with psycopg2.connect(**conn_params) as conn:

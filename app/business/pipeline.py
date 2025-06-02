@@ -17,6 +17,7 @@ from app.business.agents import (
     create_database_writer_agent
 )
 from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
