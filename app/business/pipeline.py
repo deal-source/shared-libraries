@@ -655,7 +655,7 @@ async def process_single_url(url, result_writer, extractor_agent, website_agent,
             '  "countries_involved": "Countries of entities or transaction jurisdiction",\n'
             '  "advisors": "Financial/legal advisors if mentioned",\n'
             '  "strategic_rationale": "Brief explanation of deal purpose",\n'
-            '  "additional_notes": "Any other important details"\n'
+            '  "additional_notes": "IMPORTANT: Only include deal-specific details such as transaction structure, timeline, conditions, regulatory approvals, or operational details. DO NOT include information about advisors, M&A firms, or how they helped with the deal. Focus ONLY on facts about the companies, assets, and transaction itself."\n'
             "}\n\n"
             "Only include fields where information is available in the article. "
             "Be precise and ensure all extracted data is formatted correctly as JSON.\n\n"
